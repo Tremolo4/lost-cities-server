@@ -1,3 +1,4 @@
+import itertools
 from typing import Optional
 import uuid
 import asyncio
@@ -99,6 +100,36 @@ class Game:
             logging.warn(f"ignoring unhandled message {msg}")
 
 
+async def matchmaking(conman):
+    free_runners = [runner for runner in lcmm.runners if not runner.lock.locked()]
+    if not len(free_runners) > 0:
+        logging.info("Matchmaking: 0 free runners.")
+        return
+    started_games = 0
+    gen = potential_games(conman)
+    for runner in free_runners:
+        try:
+            player_one, player_two = next(gen)
+            game = Game(player_one, player_two, runner)
+            await game.start()
+            started_games += 1
+        except StopIteration:
+            break
+    logging.info(
+        f"Matchmaking: had {len(free_runners)} free runners. Started {started_games} new games."
+    )
+
+
+def potential_games(conman):
+    for player_one, player_two in itertools.combinations(
+        conman.connections.values(), 2
+    ):
+        while (
+            player_one.available_for_new_game() and player_two.available_for_new_game()
+        ):
+            yield player_one, player_two
+
+
 async def run():
     # def cb(reader, writer):
     #     conman.register(reader, writer)
@@ -112,7 +143,7 @@ async def run():
             if end.is_set():
                 break
             async with asyncio.TaskGroup() as tg:
-                tg.create_task(conman.matchmaking())
+                tg.create_task(matchmaking(conman))
                 tg.create_task(asyncio.sleep(1))
 
     async with asyncio.TaskGroup() as tg:

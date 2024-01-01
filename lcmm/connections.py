@@ -4,11 +4,7 @@ import uuid
 import asyncio
 from asyncio import StreamReader, StreamWriter
 from dataclasses import dataclass, field
-import itertools
 import logging
-
-import lcmm.matchmaker
-import lcmm
 
 
 class ConnectionKey(str):
@@ -100,32 +96,3 @@ class ConnectionManager:
 
     def delete(self, key):
         self.connections.pop(key)
-
-    async def matchmaking(self):
-        free_runners = [runner for runner in lcmm.runners if not runner.lock.locked()]
-        if not len(free_runners) > 0:
-            logging.info("Matchmaking: 0 free runners.")
-            return
-        started_games = 0
-        gen = self.potential_games()
-        for runner in free_runners:
-            try:
-                player_one, player_two = next(gen)
-                game = lcmm.matchmaker.Game(player_one, player_two, runner)
-                await game.start()
-                started_games += 1
-            except StopIteration:
-                break
-        logging.info(
-            f"Matchmaking: had {len(free_runners)} free runners. Started {started_games} new games."
-        )
-
-    def potential_games(self):
-        for player_one, player_two in itertools.combinations(
-            self.connections.values(), 2
-        ):
-            while (
-                player_one.available_for_new_game()
-                and player_two.available_for_new_game()
-            ):
-                yield player_one, player_two

@@ -8,6 +8,8 @@ HOST, PORT = "localhost", 57910
 BOT = Path("../lost-cities/Examples/bin/Debug/net7.0/Greedy.exe")
 CLIENT = Path("../lost-cities/LostCities.Client/bin/Debug/net7.0/LostCities.Client.exe")
 
+NUM_BOTS = 10
+
 
 async def run_bot(name):
     proc: subprocess.Process = await subprocess.create_subprocess_exec(
@@ -25,8 +27,8 @@ async def run_bot(name):
 
 async def main():
     async with asyncio.TaskGroup() as tg:
-        tg.create_task(run_bot("bot1"))
-        tg.create_task(run_bot("bot2"))
+        for i in range(1, NUM_BOTS):
+            tg.create_task(run_bot(f"bot{i:02d}"))
 
 
 asyncio.run(main())

@@ -6,6 +6,8 @@ from asyncio import StreamReader, StreamWriter
 from dataclasses import dataclass, field
 import logging
 
+import lcmm.util
+
 
 class ConnectionKey(str):
     pass
@@ -46,11 +48,21 @@ class PlayerConnection:
 
         logging.debug(f"Bot connected with id_token {self.id_token}")
 
-        self._listen_task = asyncio.create_task(self._listen())
+        self._listen_task = lcmm.util.create_task(self._listen())
 
     async def _listen(self):
         while True:
-            msg = json.loads(await self.reader.readline())
+            try:
+                msg = json.loads(await self.reader.readline())
+            except ConnectionError as e:
+                logging.info(
+                    f"Bot {self.id_token}: Listen task failed: %s: %s",
+                    type(e).__name__,
+                    str(e),
+                )
+                logging.info(f"Kicking {self.id_token}")
+                lcmm.conman.delete(self.key)
+                break
             self._emit(msg)
             # logging.debug(f"Received from {self.id_token}: {msg}")
 
@@ -77,7 +89,7 @@ class PlayerConnection:
 
     def _emit(self, msg):
         for listener in self._event_listeners:
-            task = asyncio.create_task(listener(self.key, msg))
+            task = lcmm.util.create_task(listener(self.key, msg))
             # keep reference to background tasks to prevent GC
             self._event_listener_tasks.add(task)
             task.add_done_callback(self._event_listener_tasks.discard)
@@ -94,5 +106,9 @@ class ConnectionManager:
         await conn.initial_hello()
         self.connections[key] = conn
 
-    def delete(self, key):
-        self.connections.pop(key)
+    def delete(self, key: ConnectionKey):
+        try:
+            self.connections.pop(key)
+            logging.debug(f"Removed connection {key}")
+        except KeyError:
+            logging.debug(f"Could not remove connection {key}, maybe already removed.")

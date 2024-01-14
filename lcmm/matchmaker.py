@@ -5,13 +5,14 @@ import asyncio
 from asyncio import Event, Queue
 import logging
 
-import lcmm.gamerunner
+import lcmm.gamerunner, lcmm.util
 from lcmm.connections import ConnectionManager, PlayerConnection, ConnectionKey
 import lcmm
 
 
 MAX_RUNNING_GAMES = 10
 HOST, PORT = "0.0.0.0", 57910
+BOT_RESPONSE_TIMEOUT = 5
 
 
 class Game:
@@ -35,7 +36,11 @@ class Game:
         for player in self.players:
             player.games_in_progress += 1
         # remainder init task
-        self._task = asyncio.create_task(self._start())
+        self._task = lcmm.util.create_task(self._start())
+
+    def _kick(self, player: PlayerConnection):
+        logging.debug(f"{self.game_id}: kicking player {player.key}")
+        lcmm.conman.delete(player.key)
 
     async def _start(self):
         logging.debug(f"Starting game {self.game_id}")
@@ -46,20 +51,51 @@ class Game:
                 {"$type": "new_game", "id": self.game_id, "max_turn_time": 10.0}
             )
 
-        await self.all_accepted.wait()
-        self._task = asyncio.create_task(self.play())
+        logging.debug(f"{self.game_id} Waiting for bots to accept")
+
+        try:
+            await asyncio.wait_for(self.all_accepted.wait(), BOT_RESPONSE_TIMEOUT)
+        except asyncio.TimeoutError:
+            logging.info(f"{self.game_id}: Timeout waiting for bots to accept.")
+            for i, accepted in enumerate(self.acceptance):
+                if not accepted:
+                    self._kick(self.players[i])
+
+            self.stop()
+        else:
+            self._task = lcmm.util.create_task(self.play())
+
+    def stop(self):
+        logging.debug(f"{self.game_id} Ending game")
+        for i, player in enumerate(self.players, 1):
+            player.games_in_progress -= 1
+
+        lcmm.running_games.remove(self)
+        self.runner.lock.release()
 
     async def play(self):
         while True:
+            logging.debug(f"{self.game_id}: Waiting for runner")
             res = await self.runner.query_runner()
             if res.next_turn_index is None:
                 break
-            logging.debug(f"{self.game_id}: next turn")
+            logging.debug(f"{self.game_id}: Next turn")
             self.next_turn_index = res.next_turn_index
-            self.players[self.next_turn_index].send_json(
+            current_player = self.players[self.next_turn_index]
+            current_player.send_json(
                 {"$type": "turn", "id": self.game_id, "view_json": res.payload}
             )
-            _, action_json = await self.bot_message_queue.get()
+            try:
+                logging.debug(f"{self.game_id}: Waiting for bot response")
+                _, action_json = await asyncio.wait_for(
+                    self.bot_message_queue.get(), BOT_RESPONSE_TIMEOUT
+                )
+            except asyncio.TimeoutError:
+                logging.info(f"{self.game_id}: Timeout of {current_player.id_token}.")
+                self.runner.send_response("")
+                self._kick(current_player)
+                break
+
             self.runner.send_response(action_json)
 
         for i, player in enumerate(self.players, 1):
@@ -71,10 +107,8 @@ class Game:
                     "result_json": res.payload,
                 }
             )
-            player.games_in_progress -= 1
 
-        lcmm.running_games.remove(self)
-        self.runner.lock.release()
+        self.stop()
 
     async def bot_response(self, conn_key: ConnectionKey, msg: dict):
         if msg["id"] != self.game_id:
@@ -100,7 +134,7 @@ class Game:
             logging.warn(f"ignoring unhandled message {msg}")
 
 
-async def matchmaking(conman):
+async def matchmaking(conman: ConnectionManager):
     free_runners = [runner for runner in lcmm.runners if not runner.lock.locked()]
     if not len(free_runners) > 0:
         logging.info("Matchmaking: 0 free runners.")
@@ -120,7 +154,7 @@ async def matchmaking(conman):
     )
 
 
-def potential_games(conman):
+def potential_games(conman: ConnectionManager):
     for player_one, player_two in itertools.combinations(
         conman.connections.values(), 2
     ):
@@ -131,11 +165,6 @@ def potential_games(conman):
 
 
 async def run():
-    # def cb(reader, writer):
-    #     conman.register(reader, writer)
-
-    conman = ConnectionManager()
-
     end = Event()
 
     async def periodic():
@@ -143,11 +172,11 @@ async def run():
             if end.is_set():
                 break
             async with asyncio.TaskGroup() as tg:
-                tg.create_task(matchmaking(conman))
+                tg.create_task(matchmaking(lcmm.conman))
                 tg.create_task(asyncio.sleep(1))
 
     async with asyncio.TaskGroup() as tg:
-        for _ in range(10):
+        for _ in range(MAX_RUNNING_GAMES):
             logging.debug("starting runner")
             runner = lcmm.gamerunner.GameRunner()
             lcmm.runners.append(runner)
@@ -155,9 +184,9 @@ async def run():
 
     logging.debug("all runners started")
 
-    task = asyncio.create_task(periodic())
+    task = lcmm.util.create_task(periodic())
 
-    server = await asyncio.start_server(conman.on_new_connection, HOST, PORT)
+    server = await asyncio.start_server(lcmm.conman.on_new_connection, HOST, PORT)
     await server.serve_forever()
 
     end.set()

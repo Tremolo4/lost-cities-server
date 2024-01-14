@@ -27,16 +27,14 @@ class GameRunner:
             cwd=str(RUNNER.parent),
             stdout=subprocess.PIPE,
             stdin=subprocess.PIPE,
+            stderr=subprocess.PIPE,
         )
 
     def send_response(self, response: str):
         try:
             msg = json.dumps(json.loads(response))
         except Exception as e:
-            logging.warn(
-                "Bot sent invalid json, forwarding empty line to disqualify.",
-                exc_info=e,
-            )
+            logging.warn("Bot sent invalid json, forwarding empty line to disqualify.")
             msg = ""
         # logging.debug(f"Sending to runner: {msg}")
         self.proc.stdin.write(msg.encode())  # type:ignore
